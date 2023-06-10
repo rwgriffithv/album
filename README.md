@@ -9,3 +9,6 @@
 * relationship creation
 * user message settings creation
 * user message sending
+
+## system library dependencies
+* [libsodium](https://doc.libsodium.org/installation)
