@@ -8,7 +8,7 @@
 * user creation
 * relationship creation
 * user message settings creation
-* user message sending
+* user message sending (encrypted with user verification)
 
 ## system library dependencies
 * [libsodium](https://doc.libsodium.org/installation)
