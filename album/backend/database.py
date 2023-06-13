@@ -85,6 +85,7 @@ class AuthDocument(Document):
     password: bson.Binary  # encrypted password
 
 
+# TODO: only work with already encrypted passwords
 class AuthCollectionClient(CollectionClient):
     def __init__(self, database: DatabaseClient, name="authentication"):
         super().__init__(database, name)
@@ -111,7 +112,7 @@ class AuthCollectionClient(CollectionClient):
                 [("userid", mdb.ASCENDING)], unique=True, background=True)
 
 
-class MediaType(IntEnum):
+class MediaTypeEnum(IntEnum):
     NONE = 0
     LINK = auto()
     TEXT = auto()
@@ -120,17 +121,29 @@ class MediaType(IntEnum):
     SOUND = auto()
 
 
+class UserValue(TypedDict):
+    userid: str  # unique user id
+    value: str  # value associated with user
+
+
+class WeightedValue(TypedDict):
+    value: str
+    weight: float
+
+
 # depending on which collection media is stored in, it may be used to generate albums
-# TODO: timestamp, investigate replacing all userid strings with bson.ObjectIds
 class MediaDocument(Document):
-    userids: set[str]  # set of unique user ids, source of media
+    credits: list[UserValue]  # userid and credit string
     title: str  # presented title
-    tags: set[str]  # tags for media (potentially limited)
-    type: MediaType  # data type (link, text, image, video, sound) (searchable)
+    tags: list[WeightedValue]  # tags for media (potentially limited)
+    # data type (link, text, image, video, sound) (searchable)
+    type: MediaTypeEnum
     data: bson.Binary  # binary data of the media
+    timestamp: int  # timestamp in seconds (since 1970)
 
 
-# TODO: timestamp
+# may have multiple media collections
+# (help distribute load, order by type, order by visiibility/project/etc)
 class MediaCollectionClient(CollectionClient):
     def __init__(self, database: DatabaseClient, name="media", str_enc="utf-8", img_ext=".png"):
         super.__init__(database, name)
@@ -142,67 +155,72 @@ class MediaCollectionClient(CollectionClient):
         self._insert(doc)
 
     def _create_indices(self) -> None:
-        if "userids" not in self.collection.index_information():
+        if "credits" not in self.collection.index_information():
             self.collection.create_index(
-                [("userids", mdb.ASCENDING),
+                [("credits.userid", mdb.ASCENDING),
                  ("title", mdb.ASCENDING),
                  ("type", mdb.ASCENDING),
-                 ("tags", mdb.ASCENDING)], unique=False, background=True)
+                 ("tags.value", mdb.ASCENDING)], unique=False, background=True)
 
-    def _decode(self, type: MediaType, bobj: bytes) -> Any:
-        if type == MediaType.NONE:
+    def _decode(self, type: MediaTypeEnum, bobj: bytes) -> Any:
+        if type == MediaTypeEnum.NONE:
             return None
-        elif type == MediaType.LINK or type == MediaType.TEXT:
+        elif type == MediaTypeEnum.LINK or type == MediaTypeEnum.TEXT:
             return bobj.decode(self.str_enc)
-        elif type == MediaType.IMAGE:
+        elif type == MediaTypeEnum.IMAGE:
             return cv2.imdecode(np.frombuffer(bobj, dtype=np.uint8))
-        elif type == MediaType.VIDEO:
+        elif type == MediaTypeEnum.VIDEO:
             raise NotImplementedError("VIDEO type decoding not implemented")
-        elif type == MediaType.SOUND:
+        elif type == MediaTypeEnum.SOUND:
             raise NotImplementedError("SOUND type decoding not implemented")
         else:
             raise ValueError(
                 f"invalid type {type} without any decoding method")
 
-    def _encode(self, type: MediaType, obj) -> bytes | None:
-        if type == MediaType.NONE:
+    def _encode(self, type: MediaTypeEnum, obj) -> bytes | None:
+        if type == MediaTypeEnum.NONE:
             return None
-        elif type == MediaType.LINK or type == MediaType.TEXT:
+        elif type == MediaTypeEnum.LINK or type == MediaTypeEnum.TEXT:
             return str(obj).encode(self.str_enc)
-        elif type == MediaType.IMAGE:
+        elif type == MediaTypeEnum.IMAGE:
             rv, arr = cv2.imencode(self.img_ext, obj)
             if not rv:
                 raise ValueError(
                     f"failed to encode object as {self.img_ext} image")
             return bytes(arr)
-        elif type == MediaType.VIDEO:
+        elif type == MediaTypeEnum.VIDEO:
             raise NotImplementedError("VIDEO type encoding not implemented")
-        elif type == MediaType.SOUND:
+        elif type == MediaTypeEnum.SOUND:
             raise NotImplementedError("SOUND type encoding not implemented")
         else:
             raise ValueError(
                 f"invalid type {type} without any encoding method")
 
 
+class DocumentReference(TypedDict):
+    collection: str  # mongodb collection name
+    docid: bson.ObjectId  # document _id
+    context: str  # arbitrary context to store with document reference
+
+
 # posts to profiles have public visbility/album access
 # posts to message groups have private visibility and will not be in albums
-# TODO: timestamp
 class PostDocument(Document):
-    userid: str  # user id belonging to publisher of post
+    userid: str  # user id belonging to publisher of post (user/project)
     title: str  # presented title of post
-    text: str  # text body of post
-    media: set[bson.ObjectId]  # unique _ids of media included in post
+    text: bson.Binary  # text body of post, binary so can support encryption
+    media: list[DocumentReference]  # media documents, context is searchable
+    timestamp: int  # timestamp in seconds (since 1970)
     reactions: dict[str, str]  # map of userid to reaction (emoji)
     # unique _ids of reply messages / post comments
     children: list[bson.ObjectId]
     parent: bson.ObjectId  # unique _id of message replied to / post commented on
 
 
-# architecture requires one PostCollection per Profile and per Channel
-#
-# TODO: timestamp
+# no default name, PostCollection made as needed
+# all posts should not be lumped together
 class PostCollectionClient(CollectionClient):
-    def __init__(self, database: DatabaseClient, name="post",):
+    def __init__(self, database: DatabaseClient, name):
         super.__init__(database, name)
 
     def add_post(self, doc: PostDocument) -> None:
@@ -214,43 +232,89 @@ class PostCollectionClient(CollectionClient):
         if "userid" not in self.collection.index_information():
             self.collection.create_index(
                 [("userid", mdb.ASCENDING),
-                 ("title", mdb.ASCENDING)], unique=False, background=True)
+                 ("title", mdb.ASCENDING),
+                 ("media.context", mdb.ASCENDING)], unique=False, background=True)
             self.collection.create_index(
                 [("userid", mdb.TEXT),
-                 ("title", mdb.TEXT)], unique=False, background=True)
+                 ("title", mdb.TEXT),
+                 ("media.context", mdb.TEXT)], unique=False, background=True)
 
 
-class ProfilePermissionType(IntFlag):
-    NONE = 0  # cannot access profile
+class ChannelPermissionEnum(IntFlag):
+    NONE = 0  # cannot access channel
     READ = auto()  # can read but not edit anything
-    POST = auto()  # can make posts and update own posts
-    POST_ADMIN = auto()  # WRITE with updating/deleting other users posts
-    COLLECT = auto()  # can make collections and and update own collections
-    COLLECT_ADMIN = auto()  # COLLECT with updating/deleting other users collections
-    DESCRIPTION = auto()  # can edit profile description
-    ADMIN = auto()  # can do everything, including set other users' permissions
+    POST = auto()  # can make/update own posts
+    POST_ADMIN = auto()  # POST with updating/deleting all posts
+    BOARD = auto()  # can make/update own media boards
+    BOARD_ADMIN = auto()  # BOARD with updating/deleting all media boards
+    TITLE = auto()  # can edit channel title
+    DESCRIPTION = auto()  # can edit channel description
+    TAG = auto()  # can edit tag filter & only tags on all posts
+    ADMIN = auto()  # all permissions, set user permissions, can delete channel
 
 
-# TODO: maybe replace list of post document _ids with single post collection name
-# timeline uses PostCollection with name that should use userid, e.g. timeline::<userid>
-class ProfileDocument(Document):
-    userid: str  # may be unique id for user/group/project
-    permissions: dict[str, ProfilePermissionType]  # user ids to permissions
-    defpermissions: ProfilePermissionType  # default user permissions
+class MediaBoard(TypedDict):
     title: str
     description: str
-    # list of root post unique _ids published on timeline (not including comments)
-    timeline: list[bson.ObjectId]
-    collections: dict[str, set[bson.ObjectId]]  # labeled sets of media _ids
-    tags: dict[str, float]  # histogram of tag usage
-    tag_filter: set[str]  # unique userids to prevent from influencing tags
+    media: list[DocumentReference]  # media documents, context is for user use
+
+
+class ChannelDocument(Document):
+    userid: str  # userid of profile containing the channel
+    permissions: dict[str, ChannelPermissionEnum]  # explicit user permissions
+    defpermissions: ChannelPermissionEnum  # default user permissions
+    title: str
+    description: str
+    postcollection: str  # PostCollection name for channel posts
+    mediaboards: list[MediaBoard]  # sets of user-collected media
+    tags: list[WeightedValue]  # histogram of tag usage
+    tagfilter: list[bson.ObjectId]  # docs excluded from tag histogram
+
+
+# default collection name specified, reasonable to group all channel documents together
+# channels associated with specific profile
+class ChannelCollectionClient(CollectionClient):
+    def __init__(self, database: DatabaseClient, name="channels"):
+        super.__init__(database, name)
+
+    def add_channel(self, doc: ChannelDocument) -> None:
+        # TODO: validation
+        self._insert(doc)
+
+    def _create_indices(self):
+        if "userid" not in self.collection.index_information():
+            self.collection.create_index(
+                [("userid", mdb.ASCENDING)], unique=False, background=True)
+
+
+class ProfilePermissionEnum(IntFlag):
+    NONE = 0  # cannot access profile
+    READ = auto()  # can read/view available channels
+    CHANNEL = auto()  # can create own channels (upon which user is channel ADMIN)
+    CHANNEL_ADMIN = auto()  # CHANNEL with mandatory ADMIN in all channels
+    TITLE = auto()  # can edit profile title
+    DESCRIPTION = auto()  # can edit profile description
+    TAG = auto()  # can edit tag filter
+    ADMIN = auto()  # all permissions, set user permissions, can delete profile
+
+
+# has multiple Channels
+class ProfileDocument(Document):
+    userid: str  # may be unique id for user/group/project
+    permissions: dict[str, ProfilePermissionEnum]  # user ids to permissions
+    defpermissions: ProfilePermissionEnum  # default user permissions
+    title: str
+    description: str
+    channels: list[DocumentReference]  # set of channels attached to profile
+    tags: list[WeightedValue]  # histogram of tag usage across channels
+    tagfilter: list[DocumentReference]  # channels excluded from tag histogram
 
 
 # user/group/project settings & public objects
 # project requires separate private collaborative spaces, implemented as group messages
 # project timeline is the public-facing shared published media
 class ProfileCollectionClient(CollectionClient):
-    def __init__(self, database: DatabaseClient, name="profile"):
+    def __init__(self, database: DatabaseClient, name="profiles"):
         super.__init__(database, name)
 
     def add_profile(self, doc: ProfileDocument) -> None:
@@ -258,7 +322,6 @@ class ProfileCollectionClient(CollectionClient):
         self._insert(doc)
 
     def _create_indices(self) -> None:
-        # TODO: investigate mongodb unique=True for compound index
         if "userid" not in self.collection.index_information():
             self.collection.create_index(
                 [("userid", mdb.ASCENDING),
@@ -268,17 +331,15 @@ class ProfileCollectionClient(CollectionClient):
                  ("title", mdb.TEXT)], unique=False, background=True)
 
 
-# TODO: investigate replacing reactions with set and custom hash function
 class RelationDocument(Document):
-    userid: str
-    friends: set[str]  # set of unique user userids
-    prevprojects: set[str]  # set of project profile userids user has worked on
-    currprojects: set[str]  # set of project profile userids user is working on
-    groups: set[str]  # set of unique group profile userids user belongs to
-    messages: set[bson.ObjectId]  # set of channel document object _ids
-    albums: set[bson.ObjectId]  # set of album document object _ids
-    # list of profiles, post _id that was reacted to, and reaction
-    reactions: list[tuple[str, bson.ObjectId, str]]
+    userid: str  # unique userid
+    friends: list[str]  # set of unique user userids
+    projects: list[str]  # all project userids user has worked on
+    currprojects: list[str]  # current project userids user is working on
+    groups: list[str]  # set of unique group profile userids user belongs to
+    messages: list[DocumentReference]  # set of channels used for messaging
+    albums: list[DocumentReference]  # set of album references user follows
+    reactions: list[DocumentReference]  # post references with reaction context
 
 
 class RelationCollectionClient(CollectionClient):
@@ -295,39 +356,22 @@ class RelationCollectionClient(CollectionClient):
                 [("userid", mdb.ASCENDING)], unique=True, background=True)
 
 
-class ChannelPermissionType(IntFlag):
-    NONE = 0  # cannot access profile
-    READ = auto()  # can read but not edit anything
-    POST = auto()  # can make posts and update own posts
-    POST_ADMIN = auto()  # WRITE with updating/deleting other users posts
-    DESCRIPTION = auto()  # can edit profile description
-    ADMIN = auto()  # can do everything, including set other users' permissions
+class AlbumDocument(Document):
+    title: str  # unique presented title of album
+    tags: list[WeightedValue]  # tag use/relevance (indexable)
+    text: str  # text body of album description
+    media: list[DocumentReference]  # media references, context for future
 
 
-# TODO: maybe do not organize messages hierarchically like a profile
-# TODO: this may be handled by front end, we'll have to see if backend hampers it
-# TODO: maybe replace list of post document _ids with single post collection name
-# post collection may use some name that involves Channel document _id
-class ChannelDocument(Document):
-    userids: set[str]  # set of unique user userids in message room
-    permissions: dict[str, ChannelPermissionType]  # user ids to permissions
-    defpermissions: ChannelPermissionType  # default user permissions
-    title: str
-    description: str
-    # list of root post unique _ids published on timeline (not including comments)
-    timeline: list[bson.ObjectId]
-
-
-class ChannelCollectionClient(CollectionClient):
-    def __init__(self, database: DatabaseClient, name="channel"):
+class AlbumCollectionClient(CollectionClient):
+    def __init__(self, database: DatabaseClient, name="album"):
         super.__init__(database, name)
 
-    def add_channel(self, doc: ChannelDocument) -> None:
+    def add_album(self, doc: AlbumDocument) -> None:
         # TODO: validation
         self._insert(doc)
 
     def _create_indices(self):
-        # TODO: check mongodb behavior with unique=False with multi-key index
-        if "userids" not in self.collection.index_information():
+        if "title" not in self.collection.index_information():
             self.collection.create_index(
-                [("userids", mdb.ASCENDING)], unique=False, background=True)
+                [("title", mdb.ASCENDING)], unique=True, background=True)
