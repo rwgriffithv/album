@@ -63,14 +63,24 @@ class DatabaseClient:
         return self.database[name]
 
 
+class WeightedValue(TypedDict):
+    value: str  # value of interest
+    weight: float  # associated weight
+
+
 class Document(TypedDict):
     _id: NotRequired[bson.ObjectId]  # unique document id
+    # arbitrary labeled metrics (utility for all docs)
+    metrics: list[WeightedValue]
 
 
 class CollectionClient:
     def __init__(self, database: DatabaseClient, name: str):
         self.collection: mdb_c.Collection[type[Document]] = database.get_collection(
             name)
+
+    def get_collection(self) -> mdb_c.Collection[type[Document]]:
+        return self.collection
 
     def _create_indices(self) -> None:
         raise NotImplementedError
@@ -80,12 +90,30 @@ class CollectionClient:
         self._create_indices()
 
 
+class AccountStatusEnum(IntEnum):
+    ACTIVE = 0
+    DEACTIVATED = auto()
+    BANNED = auto()
+
+
+class AccountStatusRecord(TypedDict):
+    status: AccountStatusEnum  # account status
+    timestamp: int  # timestamp in seconds
+
+
+class AuthRecord(TypedDict):
+    ip: str  # ip of client when authenticated
+    timestamp: int  # timestamp in seconds
+
+
 class AuthDocument(Document):
     userid: str  # unique user id (searchable)
     password: bson.Binary  # encrypted password
+    authrecs: list[AuthRecord]  # history of logins (may be time-bound)
+    statusrecs: list[AccountStatusRecord]  # history of account statuses
 
 
-# TODO: only work with already encrypted passwords
+# TODO: only work with already encrypted passwords (maybe not, plaintext may be encrypted over HTTPS?)
 class AuthCollectionClient(CollectionClient):
     def __init__(self, database: DatabaseClient, name="authentication"):
         super().__init__(database, name)
@@ -102,6 +130,10 @@ class AuthCollectionClient(CollectionClient):
         if doc is None:
             raise ValueError("user does not exist")
         return bool(pysodium.crypto_pwhash_str_verify(doc["password"], password))
+
+    def log_authentication(self, userid: str, ip: str) -> None:
+        # TODO: update document .records
+        raise NotImplementedError
 
     def has_user(self, userid: str) -> bool:
         return self.collection.find_one({"userid": userid}) is not None
@@ -126,11 +158,6 @@ class UserValue(TypedDict):
     value: str  # value associated with user
 
 
-class WeightedValue(TypedDict):
-    value: str
-    weight: float
-
-
 # depending on which collection media is stored in, it may be used to generate albums
 class MediaDocument(Document):
     credits: list[UserValue]  # userid and credit string
@@ -139,7 +166,7 @@ class MediaDocument(Document):
     # data type (link, text, image, video, sound) (searchable)
     type: MediaTypeEnum
     data: bson.Binary  # binary data of the media
-    timestamp: int  # timestamp in seconds (since 1970)
+    timestamp: int  # timestamp in seconds
 
 
 # may have multiple media collections
@@ -203,14 +230,19 @@ class DocumentReference(TypedDict):
     context: str  # arbitrary context to store with document reference
 
 
+class EncryptedText(TypedDict):
+    text: bson.Binary  # text, conditionally encrypted
+    encrypted: bool  # true if encrypted (usually just for messaging channels)
+
+
 # posts to profiles have public visbility/album access
 # posts to message groups have private visibility and will not be in albums
 class PostDocument(Document):
     userid: str  # user id belonging to publisher of post (user/project)
     title: str  # presented title of post
-    text: bson.Binary  # text body of post, binary so can support encryption
+    text: EncryptedText  # conditionally encrypted
     media: list[DocumentReference]  # media documents, context is searchable
-    timestamp: int  # timestamp in seconds (since 1970)
+    timestamp: int  # timestamp in seconds
     reactions: dict[str, str]  # map of userid to reaction (emoji)
     # unique _ids of reply messages / post comments
     children: list[bson.ObjectId]
@@ -313,8 +345,9 @@ class ProfileDocument(Document):
 # user/group/project settings & public objects
 # project requires separate private collaborative spaces, implemented as group messages
 # project timeline is the public-facing shared published media
+# can have multiple collections, one each for users, groups, projects
 class ProfileCollectionClient(CollectionClient):
-    def __init__(self, database: DatabaseClient, name="profiles"):
+    def __init__(self, database: DatabaseClient, name):
         super.__init__(database, name)
 
     def add_profile(self, doc: ProfileDocument) -> None:
@@ -333,7 +366,8 @@ class ProfileCollectionClient(CollectionClient):
 
 class RelationDocument(Document):
     userid: str  # unique userid
-    friends: list[str]  # set of unique user userids
+    followers: list[str]  # set of unique user userids following the user
+    follows: list[str]  # set of unique user/group/project userids user follows
     projects: list[str]  # all project userids user has worked on
     currprojects: list[str]  # current project userids user is working on
     groups: list[str]  # set of unique group profile userids user belongs to
@@ -361,6 +395,7 @@ class AlbumDocument(Document):
     tags: list[WeightedValue]  # tag use/relevance (indexable)
     text: str  # text body of album description
     media: list[DocumentReference]  # media references, context for future
+    reactions: dict[str, str]  # map of userid to reaction (emoji)
 
 
 class AlbumCollectionClient(CollectionClient):
