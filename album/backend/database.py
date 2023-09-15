@@ -25,8 +25,7 @@ class ClusterClient:
         self.conn = None  # connection to cluster
 
     def connect(self) -> None:
-        conn_cfg: ConnectionConfig = self._read_config()[
-            ClusterClient.K_CFG_CONN]
+        conn_cfg: ConnectionConfig = self._read_config()[ClusterClient.K_CFG_CONN]
         key = base64.b64decode(conn_cfg["key"])
         nonce = base64.b64decode(conn_cfg["nonce"])
         econn = base64.b64decode(conn_cfg["value"])
@@ -40,10 +39,13 @@ class ClusterClient:
         key = pysodium.randombytes(pysodium.crypto_secretbox_KEYBYTES)
         nonce = pysodium.randombytes(pysodium.crypto_secretbox_NONCEBYTES)
         econn = pysodium.crypto_secretbox(conn_str, nonce, key)
-        self._write_config(ConnectionConfig(
-            key=base64.b64encode(key),
-            nonce=base64.b64encode(nonce),
-            value=base64.b64encode(econn)))
+        self._write_config(
+            ConnectionConfig(
+                key=base64.b64encode(key),
+                nonce=base64.b64encode(nonce),
+                value=base64.b64encode(econn),
+            )
+        )
 
     def _read_config(self) -> dict:
         return json.loads(self.cfg_path)
@@ -77,7 +79,8 @@ class Document(TypedDict):
 class CollectionClient:
     def __init__(self, database: DatabaseClient, name: str):
         self.collection: mdb_c.Collection[type[Document]] = database.get_collection(
-            name)
+            name
+        )
 
     def get_collection(self) -> mdb_c.Collection[type[Document]]:
         return self.collection
@@ -122,7 +125,10 @@ class AuthCollectionClient(CollectionClient):
         if self.has_user(doc["userid"]):
             raise ValueError("userid already exists")
         doc["password"] = pysodium.crypto_pwhash_str(
-            password, pysodium.crypto_pwhash_OPSLIMIT_MODERATE, pysodium.crypto_pwhash_MEMLIMIT_MODERATE)
+            password,
+            pysodium.crypto_pwhash_OPSLIMIT_MODERATE,
+            pysodium.crypto_pwhash_MEMLIMIT_MODERATE,
+        )
         self._insert(doc)
 
     def verify_user(self, userid: str, password: str) -> bool:
@@ -141,7 +147,8 @@ class AuthCollectionClient(CollectionClient):
     def _create_indices(self) -> None:
         if "userid" not in self.collection.index_information():
             self.collection.create_index(
-                [("userid", mdb.ASCENDING)], unique=True, background=True)
+                [("userid", mdb.ASCENDING)], unique=True, background=True
+            )
 
 
 class MediaTypeEnum(IntEnum):
@@ -172,7 +179,9 @@ class MediaDocument(Document):
 # may have multiple media collections
 # (help distribute load, order by type, order by visiibility/project/etc)
 class MediaCollectionClient(CollectionClient):
-    def __init__(self, database: DatabaseClient, name="media", str_enc="utf-8", img_ext=".png"):
+    def __init__(
+        self, database: DatabaseClient, name="media", str_enc="utf-8", img_ext=".png"
+    ):
         super.__init__(database, name)
         self.str_enc = str_enc
         self.img_ext = img_ext
@@ -184,10 +193,15 @@ class MediaCollectionClient(CollectionClient):
     def _create_indices(self) -> None:
         if "credits" not in self.collection.index_information():
             self.collection.create_index(
-                [("credits.userid", mdb.ASCENDING),
-                 ("title", mdb.ASCENDING),
-                 ("type", mdb.ASCENDING),
-                 ("tags.value", mdb.ASCENDING)], unique=False, background=True)
+                [
+                    ("credits.userid", mdb.ASCENDING),
+                    ("title", mdb.ASCENDING),
+                    ("type", mdb.ASCENDING),
+                    ("tags.value", mdb.ASCENDING),
+                ],
+                unique=False,
+                background=True,
+            )
 
     def _decode(self, type: MediaTypeEnum, bobj: bytes) -> Any:
         if type == MediaTypeEnum.NONE:
@@ -201,8 +215,7 @@ class MediaCollectionClient(CollectionClient):
         elif type == MediaTypeEnum.SOUND:
             raise NotImplementedError("SOUND type decoding not implemented")
         else:
-            raise ValueError(
-                f"invalid type {type} without any decoding method")
+            raise ValueError(f"invalid type {type} without any decoding method")
 
     def _encode(self, type: MediaTypeEnum, obj) -> bytes | None:
         if type == MediaTypeEnum.NONE:
@@ -212,16 +225,14 @@ class MediaCollectionClient(CollectionClient):
         elif type == MediaTypeEnum.IMAGE:
             rv, arr = cv2.imencode(self.img_ext, obj)
             if not rv:
-                raise ValueError(
-                    f"failed to encode object as {self.img_ext} image")
+                raise ValueError(f"failed to encode object as {self.img_ext} image")
             return bytes(arr)
         elif type == MediaTypeEnum.VIDEO:
             raise NotImplementedError("VIDEO type encoding not implemented")
         elif type == MediaTypeEnum.SOUND:
             raise NotImplementedError("SOUND type encoding not implemented")
         else:
-            raise ValueError(
-                f"invalid type {type} without any encoding method")
+            raise ValueError(f"invalid type {type} without any encoding method")
 
 
 class DocumentReference(TypedDict):
@@ -263,13 +274,23 @@ class PostCollectionClient(CollectionClient):
     def _create_indices(self) -> None:
         if "userid" not in self.collection.index_information():
             self.collection.create_index(
-                [("userid", mdb.ASCENDING),
-                 ("title", mdb.ASCENDING),
-                 ("media.context", mdb.ASCENDING)], unique=False, background=True)
+                [
+                    ("userid", mdb.ASCENDING),
+                    ("title", mdb.ASCENDING),
+                    ("media.context", mdb.ASCENDING),
+                ],
+                unique=False,
+                background=True,
+            )
             self.collection.create_index(
-                [("userid", mdb.TEXT),
-                 ("title", mdb.TEXT),
-                 ("media.context", mdb.TEXT)], unique=False, background=True)
+                [
+                    ("userid", mdb.TEXT),
+                    ("title", mdb.TEXT),
+                    ("media.context", mdb.TEXT),
+                ],
+                unique=False,
+                background=True,
+            )
 
 
 class ChannelPermissionEnum(IntFlag):
@@ -316,7 +337,8 @@ class ChannelCollectionClient(CollectionClient):
     def _create_indices(self):
         if "userid" not in self.collection.index_information():
             self.collection.create_index(
-                [("userid", mdb.ASCENDING)], unique=False, background=True)
+                [("userid", mdb.ASCENDING)], unique=False, background=True
+            )
 
 
 class ProfilePermissionEnum(IntFlag):
@@ -357,11 +379,15 @@ class ProfileCollectionClient(CollectionClient):
     def _create_indices(self) -> None:
         if "userid" not in self.collection.index_information():
             self.collection.create_index(
-                [("userid", mdb.ASCENDING),
-                 ("title", mdb.ASCENDING)], unique=True, background=True)
+                [("userid", mdb.ASCENDING), ("title", mdb.ASCENDING)],
+                unique=True,
+                background=True,
+            )
             self.collection.create_index(
-                [("userid", mdb.TEXT),
-                 ("title", mdb.TEXT)], unique=False, background=True)
+                [("userid", mdb.TEXT), ("title", mdb.TEXT)],
+                unique=False,
+                background=True,
+            )
 
 
 class RelationDocument(Document):
@@ -387,7 +413,8 @@ class RelationCollectionClient(CollectionClient):
     def _create_indices(self):
         if "userid" not in self.collection.index_information():
             self.collection.create_index(
-                [("userid", mdb.ASCENDING)], unique=True, background=True)
+                [("userid", mdb.ASCENDING)], unique=True, background=True
+            )
 
 
 class AlbumDocument(Document):
@@ -409,4 +436,5 @@ class AlbumCollectionClient(CollectionClient):
     def _create_indices(self):
         if "title" not in self.collection.index_information():
             self.collection.create_index(
-                [("title", mdb.ASCENDING)], unique=True, background=True)
+                [("title", mdb.ASCENDING)], unique=True, background=True
+            )
