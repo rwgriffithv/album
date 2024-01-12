@@ -1,9 +1,7 @@
 import base64
 import bson
-import cv2
 import json
 import pysodium
-import numpy as np
 import pymongo as mdb
 import pymongo.collection as mdb_c
 import pymongo.database as mdb_d
@@ -20,7 +18,7 @@ class ConnectionConfig(TypedDict):
 class ClusterClient:
     K_CFG_CONN = "mdb_connection"
 
-    def __init__(self, cfg_path="mdb_cluster.json"):
+    def __init__(self, cfg_path: str = "mdb_cluster.json"):
         self.cfg_path = cfg_path
         self.conn = None  # connection to cluster
 
@@ -118,7 +116,7 @@ class AuthDocument(Document):
 
 # TODO: only work with already encrypted passwords (maybe not, plaintext may be encrypted over HTTPS?)
 class AuthCollectionClient(CollectionClient):
-    def __init__(self, database: DatabaseClient, name="authentication"):
+    def __init__(self, database: DatabaseClient, name: str = "authentication"):
         super().__init__(database, name)
 
     def add_user(self, doc: AuthDocument, password: str) -> None:
@@ -172,22 +170,15 @@ class MediaDocument(Document):
     tags: list[WeightedValue]  # tags for media (potentially limited)
     # data type (link, text, image, video, sound) (searchable)
     type: MediaTypeEnum
-    data: bson.Binary  # binary data of the media
+    uri: str  # uri (or uri suffix) to data on file server
     timestamp: int  # timestamp in seconds
 
 
 # may have multiple media collections
 # (help distribute load, order by type, order by visiibility/project/etc)
 class MediaCollectionClient(CollectionClient):
-    def __init__(
-        self, database: DatabaseClient, name="media", str_enc="utf-8", img_ext=".png"
-    ):
-        super.__init__(database, name)
-        self.str_enc = str_enc
-        self.img_ext = img_ext
-
-    def add_media(self, doc: MediaDocument, obj) -> None:
-        doc["data"] = bson.Binary(self._encode(doc["type"], obj))
+    def add_media(self, doc: MediaDocument, obj: Any) -> None:
+        # TODO: validation
         self._insert(doc)
 
     def _create_indices(self) -> None:
@@ -203,42 +194,11 @@ class MediaCollectionClient(CollectionClient):
                 background=True,
             )
 
-    def _decode(self, type: MediaTypeEnum, bobj: bytes) -> Any:
-        if type == MediaTypeEnum.NONE:
-            return None
-        elif type == MediaTypeEnum.LINK or type == MediaTypeEnum.TEXT:
-            return bobj.decode(self.str_enc)
-        elif type == MediaTypeEnum.IMAGE:
-            return cv2.imdecode(np.frombuffer(bobj, dtype=np.uint8))
-        elif type == MediaTypeEnum.VIDEO:
-            raise NotImplementedError("VIDEO type decoding not implemented")
-        elif type == MediaTypeEnum.SOUND:
-            raise NotImplementedError("SOUND type decoding not implemented")
-        else:
-            raise ValueError(f"invalid type {type} without any decoding method")
-
-    def _encode(self, type: MediaTypeEnum, obj) -> bytes | None:
-        if type == MediaTypeEnum.NONE:
-            return None
-        elif type == MediaTypeEnum.LINK or type == MediaTypeEnum.TEXT:
-            return str(obj).encode(self.str_enc)
-        elif type == MediaTypeEnum.IMAGE:
-            rv, arr = cv2.imencode(self.img_ext, obj)
-            if not rv:
-                raise ValueError(f"failed to encode object as {self.img_ext} image")
-            return bytes(arr)
-        elif type == MediaTypeEnum.VIDEO:
-            raise NotImplementedError("VIDEO type encoding not implemented")
-        elif type == MediaTypeEnum.SOUND:
-            raise NotImplementedError("SOUND type encoding not implemented")
-        else:
-            raise ValueError(f"invalid type {type} without any encoding method")
-
 
 class DocumentReference(TypedDict):
     collection: str  # mongodb collection name
     docid: bson.ObjectId  # document _id
-    context: str  # arbitrary context to store with document reference
+    context: str  # arbitrary context for indexing/searching/etc
 
 
 class EncryptedText(TypedDict):
@@ -254,7 +214,7 @@ class PostDocument(Document):
     text: EncryptedText  # conditionally encrypted
     media: list[DocumentReference]  # media documents, context is searchable
     timestamp: int  # timestamp in seconds
-    reactions: dict[str, str]  # map of userid to reaction (emoji)
+    reactions: dict[str, str]  # map of userid to reaction id (e.g. emoji name/code)
     # unique _ids of reply messages / post comments
     children: list[bson.ObjectId]
     parent: bson.ObjectId  # unique _id of message replied to / post commented on
@@ -263,7 +223,7 @@ class PostDocument(Document):
 # no default name, PostCollection made as needed
 # all posts should not be lumped together
 class PostCollectionClient(CollectionClient):
-    def __init__(self, database: DatabaseClient, name):
+    def __init__(self, database: DatabaseClient, name: str):
         super.__init__(database, name)
 
     def add_post(self, doc: PostDocument) -> None:
@@ -315,7 +275,7 @@ class MediaBoard(TypedDict):
 class ChannelDocument(Document):
     userid: str  # userid of profile containing the channel
     permissions: dict[str, ChannelPermissionEnum]  # explicit user permissions
-    defpermissions: ChannelPermissionEnum  # default user permissions
+    defpermissions: ChannelPermissionEnum  # default user permissions (NONE for private channel)
     title: str
     description: str
     postcollection: str  # PostCollection name for channel posts
@@ -327,7 +287,7 @@ class ChannelDocument(Document):
 # default collection name specified, reasonable to group all channel documents together
 # channels associated with specific profile
 class ChannelCollectionClient(CollectionClient):
-    def __init__(self, database: DatabaseClient, name="channels"):
+    def __init__(self, database: DatabaseClient, name: str = "channels"):
         super.__init__(database, name)
 
     def add_channel(self, doc: ChannelDocument) -> None:
@@ -369,7 +329,7 @@ class ProfileDocument(Document):
 # project timeline is the public-facing shared published media
 # can have multiple collections, one each for users, groups, projects
 class ProfileCollectionClient(CollectionClient):
-    def __init__(self, database: DatabaseClient, name):
+    def __init__(self, database: DatabaseClient, name: str):
         super.__init__(database, name)
 
     def add_profile(self, doc: ProfileDocument) -> None:
@@ -403,7 +363,7 @@ class RelationDocument(Document):
 
 
 class RelationCollectionClient(CollectionClient):
-    def __init__(self, database: DatabaseClient, name="relationship"):
+    def __init__(self, database: DatabaseClient, name: str = "relationship"):
         super.__init__(database, name)
 
     def add_relation(self, doc: RelationDocument) -> None:
@@ -422,11 +382,11 @@ class AlbumDocument(Document):
     tags: list[WeightedValue]  # tag use/relevance (indexable)
     text: str  # text body of album description
     media: list[DocumentReference]  # media references, context for future
-    reactions: dict[str, str]  # map of userid to reaction (emoji)
+    reactions: dict[str, str]  # map of userid to reaction id (e.g. emoji name/code)
 
 
 class AlbumCollectionClient(CollectionClient):
-    def __init__(self, database: DatabaseClient, name="album"):
+    def __init__(self, database: DatabaseClient, name: str = "album"):
         super.__init__(database, name)
 
     def add_album(self, doc: AlbumDocument) -> None:
